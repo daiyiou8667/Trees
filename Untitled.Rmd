@@ -1,0 +1,186 @@
+---
+title: "Trees"
+author: "Dai Yiou"
+output: html_document
+date: "2023-10-19"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+##  1. loading data 
+
+Although tree can automatically handle missing values, here in this particular case, our purpose is to predict on this sample, in other words, we want to have the same observations in our 3 models (linear model-ridge, GAM and tree) and compare the RMSE across these models. So based on the particular purpose, we decide to remove the variables that has the missing values. 
+
+```{r}
+library(readr)
+AH <- read_csv("AH (1).csv")
+#  View(AH)
+AH <- na.omit(AH) 
+str(AH)
+head(AH)
+plot(AH$SalePrice, ylab = "Sale Price")
+# identify(AH$SalePrice)
+AH[AH$SalePrice > 700000,]
+AH[AH$SalePrice < 20000,]
+```
+
+## 2. Split data 
+
+Use 70% of the data (2050 obs.) as the training set and the rest 30% of the data (879 obs.) as the testing set. 
+
+```{r}
+set.seed(1)
+indx <- sample(1:2929, size = 2929, replace = F)
+AH.train <- AH[indx[1:2050],]
+AH.test <- AH[indx[2051:2929],]              
+```
+
+## 3. Transformation 
+
+(1) Response: SalePrice is mesured in dollars, and we log-transformed it to make it more bell-shaped. 
+(2) Features: LotArea (sqf), OverallCond (range 1-9, 1 is the worst condition of the house and 9 is the best condition), YearBuild (which year was the house built), TotalBsmtSF (total basement sqf), and LivingArea (living area sqf). All of them are numeric. 
+(3) Should we do log-transformation for predictor such as LotArea? Not necessory in trees! 
+
+```{r}
+names(AH)
+lSalePrice <- log(AH.train$SalePrice)
+df1 <- cbind(lSalePrice, AH.train)
+df.train <- df1[,-2]
+lSalePrice <- log(AH.test$SalePrice)
+df <- cbind(lSalePrice, AH.test)
+df.test <- df[,-2]
+```
+
+## 4. Fit a single tree 
+
+(1) The 1st split (node 2 and 3) is on LivingArea, and 1054 subjects have LivingArea less than 2474, with a mean response value of 11.8, whereas 996 observations have LivingArea greater than 2474, with a mean response value of 12.3. The total RSS has been reduced from 335 to 80 + 107 = 187, which is about 55% of total SSE.  
+(2) The best tree is 15 splits becaue it has smallest cross-validation error. Variables actually used in tree construction are: LivingArea, LotArea, Overall Cond and YearBuilt.   
+
+```{r}
+library(rpart)
+fit1 <- rpart(lSalePrice~., data = df.train, control = rpart.control (cp = 0.005, xval = 50))
+fit1
+printcp(fit1)
+# R^2 
+# attach(df.train)
+# pred1 <- predict(fit1, df.train)
+# 1-sum((pred1 - lSalePrice)^2)/sum((lSalePrice - mean(lSalePrice))^2)
+# fit.1 <- lm(lSalePrice ~., data = df.train)
+# summary(fit.1)
+# detach(df.train)
+```
+
+## 5. Check the prediction performance 
+
+(1) Check the prediction performance on the test set for all cp values. 
+
+```{r}
+plot3 <- plotcp(fit1)
+plot
+rmse.tree <- rep(0,nrow(fit1$cptable)-1)
+  for (i in 1:(nrow(fit1$cptable)-1)){
+    prune.fit1 <- prune(fit1, cp = fit1$cptable [(i+1),1])
+    pred <- predict(prune.fit1, newdata = df.test)
+    rmse.tree[i] <- sqrt(mean((pred-df.test$lSalePrice)^2))
+}
+rmse.tree #test error 
+```
+
+(2) Bagged 100 regression tree and save the 100 trees in list trees and predicted value on test set in pred_boot. We can see that the rmse = 0.0026 for bagging estimation, which is smaller than the best single tree on the test set. 
+
+```{r}
+B <- 100
+n <- nrow(df.train)
+set.seed(1)
+bootsamples <- rmultinom(B, n, rep(1,n)/n)
+trees <- vector(mode = "list", length = B) # save B bootstrapped trees
+pred_boot <- matrix(0, nrow(df.test), B) # save predictions
+fit2 <- rpart(lSalePrice ~., data = df.train,
+              control = rpart.control(cp = 0.005, xval = 0, maxsurrogate = 0, maxcompete = 0))
+for (i in 1:B){
+  trees[[i]] <- update(fit2, weights = bootsamples [,i])
+  pred_boot [,i] <- predict(trees[[i]], df.test)
+}
+bag.pred <- apply(pred_boot, 1, mean)
+RMSE <- sqrt(mean(bag.pred - df.test$lSalePrice)^2)
+RMSE
+```
+
+
+## 6. Advantage and disadvantage of Trees: 
+
+Advantages: 
+
+(1) Interpretability and visualization：Trees are very easy to explain (IF/AND/THEN) to people (even easier to explain than linear models!) and it has a nice graphical representation. 
+(2) Tree can capture complex interaction structures in the data. 
+(3) Tree can easily handle mix-type of data (categorical and numerical) and missing values.  
+
+Disadvantages: 
+
+(1) Predictive accuracy: Tree may not have the same level of predictive accuracy as some of the other regression approaches. But by combining a large number of trees, we can get result in improvements in prediction accuracy, at the expense of some loss in interpretation. .  
+(2) Model instability: One tree may have high variance, which means a small change in the data can cause a large change in the final estimated tree. So in our project, by bagging, we can turn this weakness into strength: the predictive performance of trees are improved and the variances are reduced (no effects on bias). In our case, we get RMSE = 0.0026 for Trees and RMSE = 0.0006 for MRL-ridge, RMSE = 0.185 for GAM. 
+
+## 7. Randon Forest 
+ 
+(1) Fitting regression trees 
+ 
+```{r}
+library(randomForest)
+set.seed(1) 
+fit3 <- randomForest(lSalePrice ~., data = df.train, xtest = df.test [,-1], ytest = df.test$lSalePrice, keep.forest = T)
+fit3
+```
+ 
+The default value for ntree is 500 and mtry is [p/3] = 2. The MSE on the OOB samples is about 0.025 and R-square is about 85%, the MSE and R-suqare on the test samples are around 0.03 and 81%. If we use all the trees to predict the train samples, and MSE and R-square will be different. 
+
+```{r}
+pred.train <- predict(fit3, df.train)
+mean((pred.train - df.train$lSalePrice)^2) #MSE using all trees 
+```
+
+```{r}
+1-sum((pred.train-df.train$lSalePrice)^2)/(399*var(df.train$lSalePrice)) #R-square using all trees 
+```
+
+We can plot the MSE curves on the OOB samples. 
+
+```{r}
+plot(fit3, main = "MSE on OOB samples")
+```
+
+(2) We can compare the above random forest model with bagging trees. 
+
+```{r}
+set.seed(1)
+fit4 <- randomForest(lSalePrice ~., data = df.train, xtest = df.test[,-1], ytest = df.test$lSalePrice, mtry = 5)
+fit4
+```
+
+The bagging trees performs the same in RF with mtry = 5. Let's now take a look of variable importance. 
+
+```{r}
+importance(fit3)
+varImpPlot(fit3, sort = TRUE, main = "Relative variable importance")
+```
+
+Variable "LivingArea" and "YearBuilt" are the two most important variables in the RF model. Let's see their marginal effect on the response "lSalePrice" adjusted by the average effects of other variables. 
+
+```{r}
+par(mfrow=c(1,2))
+partialPlot(fit3, df.train, 'LivingArea')
+partialPlot(fit3, df.train, 'YearBuilt')
+```
+
+(3) As a result of using tree-based models, the partial dependence plots above are not strictly smooth. The hash marks at the bottom of the plot indicate the deciles of the corresponding variable. Note that the data is sparse near the edges, which causes the curves to be somewhat less well determined in these regions. The partial dependence plot of lSalePrice on "LivingArea" is generally increasing with increasing squarefoot of living area, but will be flatted and even decreased when living area reaches a certain large amount. Also, the house price is also generally increasing with YearBuilt.  
+
+## 8. Conclusion 
+
+```{r}
+#RMSE_Comparasion <- matrix(c(summary.output(log(y_test),pred4), rmse_gam, pred6, pred7), nrow = 1, dimnames = list(NULL, c("Linear Model", "GAM", "GLM", "Tree")))
+#RMSE_Comparasion
+```
+
+
+ 
